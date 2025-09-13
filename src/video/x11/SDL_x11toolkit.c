@@ -117,7 +117,8 @@ typedef struct SDL_ToolkitEntryControlX11
 	int text_reserved_w;
 	ssize_t draw_sz;
 	size_t draw_buffer_offset;
-    int ascent;
+    int cur_draw_y1;
+    int cur_draw_y2;
 } SDL_ToolkitEntryControlX11;
 
 /* Font for icon control */
@@ -2182,21 +2183,24 @@ static void X11Toolkit_CalculateEntryControl(SDL_ToolkitControlX11 *control) {
 	int asc;
 
     entry_control = (SDL_ToolkitEntryControlX11 *)control;
-	control->rect.h = X11Toolkit_GetMaximumTextHeight(control->window, &asc) + SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * 2 * control->window->iscale;
+    entry_control->cur_draw_y2 = X11Toolkit_GetMaximumTextHeight(control->window, &asc);
+	control->rect.h = entry_control->cur_draw_y2 + SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * 2 * control->window->iscale;
 	entry_control->text_x = SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * control->window->iscale;
 	entry_control->text_y = SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * control->window->iscale + asc;
+	entry_control->cur_draw_y1 = SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * control->window->iscale;
+	entry_control->cur_draw_y2 += entry_control->cur_draw_y1;
     if (control->window->utf8) {
         entry_control->text_y -= 2 * control->window->iscale;
     } else {
         entry_control->text_y -= 4 * control->window->iscale;
     }
 	entry_control->text_reserved_w = control->rect.w - SDL_TOOLKIT_X11_ELEMENT_PADDING_3 * 2 * control->window->iscale;
-    entry_control->ascent = asc;
 }
 
 static void X11Toolkit_DrawEntryControl(SDL_ToolkitControlX11 *control) {
     SDL_ToolkitEntryControlX11 *entry_control;
 	size_t sz;
+	int cursor_x;
 
     entry_control = (SDL_ToolkitEntryControlX11 *)control;
 
@@ -2216,25 +2220,18 @@ static void X11Toolkit_DrawEntryControl(SDL_ToolkitControlX11 *control) {
 	X11_XSetForeground(control->window->display, control->window->ctx, control->window->xcolor_light_control_bg.pixel);
 	X11_XFillRectangle(control->window->display, control->window->drawable, control->window->ctx, control->rect.x + (2* control->window->iscale), control->rect.y + (2* control->window->iscale),  control->rect.w - (4* control->window->iscale), control->rect.h - (4* control->window->iscale));
 
+    /* Cursor */
+    X11_XSetForeground(control->window->display, control->window->ctx, control->window->xcolor[SDL_MESSAGEBOX_COLOR_TEXT].pixel);
+    cursor_x = control->rect.x + entry_control->text_x + entry_control->cur_x;
+    X11_XDrawLine(control->window->display, control->window->drawable, control->window->ctx, cursor_x, control->rect.y + entry_control->cur_draw_y1, cursor_x, control->rect.y + entry_control->cur_draw_y2);
+
 	/* Draw text */
 	if (entry_control->draw_sz != -1) {
 		sz = entry_control->draw_sz;
 	} else {
 		sz = entry_control->sz;
 	}
-
-    /* Cursor */
-    X11_XSetForeground(control->window->display, control->window->ctx,
-        control->window->xcolor[SDL_MESSAGEBOX_COLOR_TEXT].pixel);
-    
-    int cursor_x = control->rect.x + entry_control->text_x + entry_control->cur_x;
-    int cursor_y_top = control->rect.y + entry_control->text_y - entry_control->ascent;
-    int cursor_y_bottom = cursor_y_top + entry_control->ascent;
-        
-    X11_XDrawLine(control->window->display, control->window->drawable, control->window->ctx, cursor_x, cursor_y_top, cursor_x, cursor_y_bottom);
-
-	X11_XSetForeground(control->window->display, control->window->ctx, control->window->xcolor[SDL_MESSAGEBOX_COLOR_TEXT].pixel);
-    
+	
 #ifdef X_HAVE_UTF8_STRING
 	if (control->window->utf8) {
 		X11_Xutf8DrawString(control->window->display, control->window->drawable, control->window->font_set, control->window->ctx,
@@ -2273,7 +2270,6 @@ void X11Toolkit_InjectStringIntoEntryControlBuffer(SDL_ToolkitEntryControlX11 *e
 	}
 
 	old_sz = entry->sz;
-
 	if (entry->buffer) {
 		char *old_buffer;
 
@@ -2292,30 +2288,13 @@ void X11Toolkit_InjectStringIntoEntryControlBuffer(SDL_ToolkitEntryControlX11 *e
 		SDL_strlcpy(entry->buffer, str, entry->sz+1);
 		entry->cur++;
 	}
-
-
-	pre_cur = SDL_calloc(entry->cur, sizeof(char));
-	strncpy(pre_cur, entry->buffer, entry->cur);
-#ifdef X_HAVE_UTF8_STRING
-	if (base_control->window->utf8) {
-		int h;
-
-		X11Toolkit_GetTextWidthHeight(base_control->window, pre_cur, entry->cur, &entry->cur_x, &h, NULL, NULL);
-	} else
-#endif
-	{
-		entry->cur_x = X11_XTextWidth(base_control->window->font_struct, pre_cur, entry->cur);
-	}
-	SDL_free(pre_cur);
-
-	if (entry->cur_x >= entry->text_reserved_w && entry->draw_sz == -1) {
-		entry->draw_sz = entry->sz - (entry->cur - 1);
-		entry->draw_buffer_offset = entry->sz - entry->draw_sz;
-	}
+	entry->draw_sz = entry->sz; /* temporary */
 }
 
 static bool X11Toolkit_ProcessEntryControlEvent(SDL_ToolkitControlX11 *control) {
+	/* TODO: UTF8/XIM support, selections, scroll */
     SDL_ToolkitEntryControlX11 *entry_control;
+    char *pre_cur;
     char str[64];
 	int sz;
     KeySym keysym;
@@ -2334,23 +2313,29 @@ static bool X11Toolkit_ProcessEntryControlEvent(SDL_ToolkitControlX11 *control) 
                 if (entry_control->cur < entry_control->sz) {
                     entry_control->cur++;
                 }
+            } else if (keysym == XK_BackSpace) {
+                if (entry_control->cur > 0 && entry_control->sz > 0) {
+					entry_control->cur--;
+					SDL_memmove(&entry_control->buffer[entry_control->cur], &entry_control->buffer[entry_control->cur + 1], entry_control->sz - entry_control->cur);
+					entry_control->sz--;
+					entry_control->draw_sz = entry_control->sz; /* temporary */
+                }
+            } else if (keysym == XK_Tab) {
+                /* Just ignore these keys for now. */
             } else {
                 sz = X11_XLookupString(&control->window->e->xkey, str, sizeof(str), NULL, NULL);
                 X11Toolkit_InjectStringIntoEntryControlBuffer(entry_control, str, sz);
             }
 
-            char *pre_cur = SDL_calloc(entry_control->cur + 1, sizeof(char));
+			pre_cur = SDL_calloc(entry_control->cur + 1, sizeof(char));
             strncpy(pre_cur, entry_control->buffer, entry_control->cur);
             pre_cur[entry_control->cur] = '\0';
-
             if (control->window->utf8) {
                 int h;
-
                 X11Toolkit_GetTextWidthHeight(control->window, pre_cur, entry_control->cur, &entry_control->cur_x, &h, NULL, NULL);
             } else {
                 entry_control->cur_x = X11_XTextWidth(control->window->font_struct, pre_cur, entry_control->cur);
             }
-
             control->window->draw = true;
             break;
 	}
