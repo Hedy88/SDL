@@ -2259,6 +2259,54 @@ static void X11Toolkit_DestroyEntryControl(SDL_ToolkitControlX11 *control) {
 	SDL_free(entry_control);
 }
 
+static void X11Toolkit_EnsureCursorVisible(SDL_ToolkitControlX11 *control) {
+    SDL_ToolkitEntryControlX11 *entry_control = (SDL_ToolkitEntryControlX11 *)control;
+    int height;
+
+    if (control->window->utf8) {
+#ifdef X_HAVE_UTF8_STRING
+        X11Toolkit_GetTextWidthHeight(
+            control->window,
+            entry_control->buffer + entry_control->draw_buffer_offset,
+            entry_control->cur - entry_control->draw_buffer_offset,
+            &entry_control->cur_x, &height, NULL, NULL
+        );
+#endif
+    } else {
+        entry_control->cur_x = X11_XTextWidth(
+            control->window->font_struct,
+            entry_control->buffer + entry_control->draw_buffer_offset,
+            entry_control->cur - entry_control->draw_buffer_offset
+        );
+    }
+
+    if (entry_control->cur < entry_control->draw_buffer_offset) {
+        entry_control->draw_buffer_offset = entry_control->cur;
+        entry_control->cur_x = 0;
+    }
+
+    if (entry_control->cur_x >= entry_control->text_reserved_w) {
+        entry_control->draw_buffer_offset++;
+
+        if (control->window->utf8) {
+#ifdef X_HAVE_UTF8_STRING
+            X11Toolkit_GetTextWidthHeight(
+                control->window,
+                entry_control->buffer + entry_control->draw_buffer_offset,
+                entry_control->cur - entry_control->draw_buffer_offset,
+                &entry_control->cur_x, &height, NULL, NULL
+            );
+#endif
+        } else {
+            entry_control->cur_x = X11_XTextWidth(
+                control->window->font_struct,
+                entry_control->buffer + entry_control->draw_buffer_offset,
+                entry_control->cur - entry_control->draw_buffer_offset
+            );
+        }
+    }
+} 
+
 void X11Toolkit_InjectStringIntoEntryControlBuffer(SDL_ToolkitEntryControlX11 *entry, char *str, int sz) {
 	SDL_ToolkitControlX11 *base_control;
 	char *pre_cur;
@@ -2281,14 +2329,36 @@ void X11Toolkit_InjectStringIntoEntryControlBuffer(SDL_ToolkitEntryControlX11 *e
 		strncat(entry->buffer, str, sz);
 		strcat(entry->buffer,old_buffer+entry->cur);
 		SDL_free(old_buffer);
-		entry->cur++;
-	} else {
+        entry->cur += sz;
+    } else {
 		entry->sz = sz;
 		entry->buffer = SDL_malloc(entry->sz+1);
 		SDL_strlcpy(entry->buffer, str, entry->sz+1);
-		entry->cur++;
-	}
-	entry->draw_sz = entry->sz; /* temporary */
+        entry->cur += sz;
+    }
+
+    pre_cur = SDL_calloc(entry->cur + 1, sizeof(char));
+    
+    if (entry->cur > 0 && entry->cur <= entry->sz) {
+        memcpy(pre_cur, entry->buffer, entry->cur);
+    }
+    
+    pre_cur[entry->cur] = '\0';
+
+#ifdef X_HAVE_UTF8_STRING
+    if (base_control->window->utf8) {
+        int h;
+        X11Toolkit_GetTextWidthHeight(base_control->window, pre_cur, entry->cur,
+                                      &entry->cur_x, &h, NULL, NULL);
+    } else
+#endif
+    {
+        entry->cur_x = X11_XTextWidth(base_control->window->font_struct,
+                                      pre_cur, entry->cur);
+    }
+    SDL_free(pre_cur);
+
+    X11Toolkit_EnsureCursorVisible(base_control);
 }
 
 static bool X11Toolkit_ProcessEntryControlEvent(SDL_ToolkitControlX11 *control) {
@@ -2318,14 +2388,14 @@ static bool X11Toolkit_ProcessEntryControlEvent(SDL_ToolkitControlX11 *control) 
 					entry_control->cur--;
 					SDL_memmove(&entry_control->buffer[entry_control->cur], &entry_control->buffer[entry_control->cur + 1], entry_control->sz - entry_control->cur);
 					entry_control->sz--;
-					entry_control->draw_sz = entry_control->sz; /* temporary */
+                    entry_control->draw_sz = entry_control->sz; /* temporary */
                 }
             } else if (keysym == XK_Tab) {
                 /* Just ignore these keys for now. */
             } else {
                 sz = X11_XLookupString(&control->window->e->xkey, str, sizeof(str), NULL, NULL);
                 X11Toolkit_InjectStringIntoEntryControlBuffer(entry_control, str, sz);
-            }
+            }            
 
 			pre_cur = SDL_calloc(entry_control->cur + 1, sizeof(char));
             strncpy(pre_cur, entry_control->buffer, entry_control->cur);
@@ -2335,7 +2405,10 @@ static bool X11Toolkit_ProcessEntryControlEvent(SDL_ToolkitControlX11 *control) 
                 X11Toolkit_GetTextWidthHeight(control->window, pre_cur, entry_control->cur, &entry_control->cur_x, &h, NULL, NULL);
             } else {
                 entry_control->cur_x = X11_XTextWidth(control->window->font_struct, pre_cur, entry_control->cur);
-            }
+            }      
+            
+            X11Toolkit_EnsureCursorVisible(control);
+
             control->window->draw = true;
             break;
 	}
